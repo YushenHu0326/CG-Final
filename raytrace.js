@@ -3,14 +3,15 @@ rooms.raytrace = function() {
 
 lib3D();
 
-description = `Try playing around with the camera!
+description = `
 <small>
     <p>
     <b>Atmospheric parameters</b>
     <br> <input type="range" id="tod" value="20",min="1",max="100"> Time of Day
     <br> <input type="range" id="fi"  value="10",min="1",max="100"> Fog Intensity
-    <br> <input type="range" id="ci"  value="100",min="1",max="100"> Cloud Intensity
-    <br> <input type="checkbox" id="cbx" onclick="onVisualizeClicked()"> Visualize Sphere
+    <br> <input type="range" id="ci"  value="10",min="1",max="100"> Cloud Intensity
+    <br> <input type="checkbox" id="cbx_0" onclick="onVolumetricClicked()"> Volumetric Light
+    <br> <input type="checkbox" id="cbx"   onclick="onVisualizeClicked()"> Visualize Sphere
 </small>
 `;
 
@@ -51,16 +52,17 @@ code = {
    // DEFINE INTERACTIVE
 
    S.visualizeSphere = false;
+   S.vl = false;
+   S.pitch = 0.;
+   S.yaw = 0.;
    S.mouseX = 0.;
    S.mouseY = 0.;
+   S.cPos = [0., 2.5, 10.];
+   S.cDir = [0., 0. ,  0.];
 
    // DEFINE NUMBER OF LIGHTS
 
    S.nL = 1;
-
-   // DEFINE CAMERA POSITION
-
-   S.cPos = [0.,-.2,2.];
 
    // DEFINE MATERIALS TO BE RENDERED VIA PHONG REFLECTANCE MODEL
 
@@ -72,13 +74,13 @@ code = {
       [.1,.1,.1,0,     .1,.1,.1,0,  1,1,1,5,    0,0,0,0], // SILVER
    ];
 
-   S.nS = 10;
+   S.nS = 100;
    S.sPos = [];
    S.sRadius = [];
    for (let n = 0 ; n < S.nS ; n++) {
-      S.sPos.push([ 2. * (Math.random() - .5),
-                    1.,
-                    2. * (Math.random() - .5) ]);
+      S.sPos.push([ .03 * S.nS * (Math.random() - .5),
+                    2.,
+                    .03 * S.nS * (Math.random() - .5) ]);
       S.sRadius.push([.5 + .5 * Math.random(), Math.random(), 1.]);
    }
 `,
@@ -91,6 +93,7 @@ S.setFragmentShader(\`
    const int nL = \` + S.nL + \`;
 
    uniform vec3 uCamPos;
+   uniform vec3 uCamDir;
    uniform float uTime;
    uniform float uTOD;
    uniform vec3 uBgColor;
@@ -104,6 +107,7 @@ S.setFragmentShader(\`
 
    uniform vec4 uS[nS];
    uniform float uV;
+   uniform float uVL;
 
    // DEFINE CAMERA FOCAL LENGTH
 
@@ -148,6 +152,46 @@ S.setFragmentShader(\`
       return uLc[0] * 1.5;
    }
 
+   // RAY MARCHING VOLUMETRIC LIGHT
+
+   float rayRoughSphere(vec3 V, vec3 W, vec4 S) {
+      V -= S.xyz;
+      V += .01 * W;
+      float b = dot(V, W);
+      float r = S.w / 2.;
+      float d = b * b - dot(V, V) + r * r;
+      return d < 0. ? -1. : -b - sqrt(d);
+   }
+
+   vec3 marchVolumetricLight(vec3 V, vec3 W, float t, vec3 inColor) {
+      float d = t / 50.;
+      if (d > .5) d = .5;
+      float step = 0.;
+      vec3 P = V;
+      bool detect = false;
+
+      for (int i = 0; i < 50; i++) {
+         if (!detect && step < t) {
+            step += d;
+            P += W * d;
+            float r = 10.;
+
+            for (int j = 0; j < nS; j++) {
+               if (!detect) {
+                  float rt = rayRoughSphere(P, uLd[0], uS[j]);
+                  if (rt > 0. && rt < r) {
+                     r = rt;
+                     detect = true;
+                  }
+               }
+            }
+         }
+      }
+
+      if (detect) return inColor / 1.1;
+      return inColor;
+   }
+
    // COMPUTE AND SHADE THE NOISE-BASED CLOUDS USING RAY-MARCHING
 
    float getNoiseRadius(vec3 P, float r) {
@@ -188,15 +232,7 @@ S.setFragmentShader(\`
       return t;
    }
 
-   float rayRoughSphere(vec3 V, vec3 W, vec4 S) {
-      V -= S.xyz;
-      V += .01 * W;
-      float b = dot(V, W);
-      float r = S.w;
-      return b * b - dot(V, V) + r * r;
-   }
-
-   vec4 rayCloud(vec3 V, vec3 W) {
+   vec4 shadeCloud(vec3 V, vec3 W, vec3 inColor) {
       float t = 1000.;
 
       vec3 P;
@@ -343,7 +379,7 @@ S.setFragmentShader(\`
          rc = shadeSun(P, R, rtMin) * uLc[0];
       }
 
-      vec4 rCl = rayCloud(P, R);
+      vec4 rCl = shadeCloud(P, R, c);
       if (rCl.a > 0. && rCl.a < rtMin) {
          rtMin = rCl.w;
          rc = rCl.rgb;
@@ -469,10 +505,13 @@ S.setFragmentShader(\`
 
       // RAY MARCH AND SHADE THE CLOUDS
 
-      vec4 tC = rayCloud(V, W);
+      vec4 tC = shadeCloud(V, W, color);
       if (tC.a > 0. && tC.a < tMin) {
          color = tC.rgb;
          tMin = tC.a;
+      }
+      else if (uVL > 0.) {
+         color = marchVolumetricLight(V, W, tMin, color);
       }
          
       // ADD FOG LAYER
@@ -573,16 +612,11 @@ render: `
 
    // SEND CAMERA INFO TO GPU
 
-   let cmX = 40.;
-   let cmY = 100;
-   let cmZ = 100.;
-
-   let offsetX = cmX + Math.sin(S.mouseX) * 100.;
-   let offsetY = cmY + Math.sin(S.mouseY) * 100.;
-   let offsetZ = cmX + Math.cos(S.mouseX) * 100.;
-   S.cPos = [offsetX / 50., offsetY/ 50.,offsetZ / 10.];
-
    S.setUniform('3fv', 'uCamPos', S.cPos);
+
+   S.cDir = [Math.sin(S.yaw), Math.sin(S.pitch), Math.cos(S.yaw)];
+
+   S.setUniform('3fv', 'uCamDir', S.cDir);
 
    // GET ATMOSPHERIC DATA
 
@@ -606,13 +640,12 @@ render: `
 
    // CHANGE SPHERE POSITION RADIUS
 
-   S.nS = Math.floor(10. * ci.value / 100.);
+   S.nS = Math.floor(ci.value);
+   if (S.nS == 0) S.nS = 1;
 
    for (let n = 0; n < S.nS; n++) {
-      S.sPos[n][0] += .001 * Math.sin(time) * Math.abs(Math.random());
-      S.sPos[n][2] += .001 * Math.cos(time) * Math.abs(Math.random());
       S.sRadius[n][2] = (1. + .1 * Math.sin(time * S.sRadius[n][1]) * S.sRadius[n][0])
-                         * ci.value / 100.;
+                         * Math.min(1., ci.value / 10.);
    }
 
    // SEND SPHERES DATA TO GPU
@@ -635,6 +668,13 @@ render: `
 
    S.setUniform('1f', 'uV', visualize);
 
+   // SET VISUALIZE DATA TO GPU
+
+   let voll = 0.;
+   if (S.vl) voll = 1.;
+
+   S.setUniform('1f', 'uVL', voll);
+
    // SEND ANIMATION TIME TO GPU
 
    S.setUniform('1f', 'uTime', time);
@@ -652,12 +692,52 @@ render: `
 events: `
 
   onDrag = (x,y) => {
+      if (x > S.mouseX) S.yaw += .01;
+      else S.yaw -= .01;
+
+      if (y > S.mouseY) S.pitch += .01;
+      else S.pitch -= .01;
+
       S.mouseX = x;
       S.mouseY = y;
   }
 
+  onKeyPress = key => {
+
+      // FORWARD
+      if (key == 87) {
+         S.cPos[2] -= .1;
+      }
+      // BACKWARD
+      else if (key == 83) {
+         S.cPos[2] += .1;
+      }
+      // LEFT
+      else if (key == 65) {
+         S.cPos[0] -= .1;
+      }
+      // RIGHT
+      else if (key == 68) {
+         S.cPos[0] += .1;
+      }
+      // UP
+      else if (key == 81) {
+         S.cPos[1] += .1;
+      }
+      // DOWN
+      else if (key == 69) {
+         S.cPos[1] = Math.max(S.cPos[1] - .1, .1);
+      }
+
+      console.log(key);
+  }
+
   onVisualizeClicked = () => {
       S.visualizeSphere = !S.visualizeSphere;
+  }
+
+  onVolumetricClicked = () => {
+      S.vl = !S.vl;
   }
 `
 };
